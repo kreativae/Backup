@@ -16,8 +16,22 @@ import { AgendaPage } from './pages/AgendaPage';
 import { initEmergencyUnblock, forceCleanup } from './utils/fixClickBlock';
 
 export function App() {
-  const { currentPage, isAuthenticated } = useStore();
+  const { currentPage, isAuthenticated, checkAuth, fetchLeads, fetchClients, fetchTasks, fetchCalendarEvents } = useStore();
   const prevPageRef = useRef(currentPage);
+
+  // Initial Data Fetch
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchLeads();
+      fetchClients();
+      fetchTasks();
+      fetchCalendarEvents();
+    }
+  }, [isAuthenticated]);
 
   // Initialize emergency unblock handler (ESC x3 to force cleanup)
   useEffect(() => {

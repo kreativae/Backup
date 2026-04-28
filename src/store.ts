@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { authService, leadService, clientService, taskService, calendarService } from './api';
 import type { AppPage, User, Lead, Conversation, Task, Channel, ConversationStatus, AutomationFlow, AutomationExecution, FinanceRecord, SellerGoal, CalendarEvent, Client } from './types';
 import { mockUsers, mockLeads, mockConversations, mockTasks, mockAutomations, mockExecutions, mockFinanceRecords, mockSellerGoals } from './data/mockData';
 
@@ -49,14 +50,20 @@ export interface AuditLog {
   details?: string;
 }
 
-interface AppState {
+  // Global State
+  isLoading: boolean;
+  error: string | null;
+  setLoading: (loading: boolean) => void;
+  setError: (error: string | null) => void;
+
   currentPage: AppPage;
   setCurrentPage: (page: AppPage) => void;
 
   isAuthenticated: boolean;
   currentUser: User | null;
-  login: (email: string, password: string) => boolean;
+  login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
+  checkAuth: () => Promise<void>;
 
   sidebarCollapsed: boolean;
   toggleSidebar: () => void;
@@ -65,10 +72,11 @@ interface AppState {
   toggleAiAssistant: () => void;
 
   leads: Lead[];
-  addLead: (lead: Lead) => void;
-  updateLead: (leadId: string, updates: Partial<Lead>) => void;
-  deleteLead: (leadId: string) => void;
-  moveLeadToStage: (leadId: string, stageId: string) => void;
+  fetchLeads: () => Promise<void>;
+  addLead: (lead: Omit<Lead, '_id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
+  updateLead: (leadId: string, updates: Partial<Lead>) => Promise<void>;
+  deleteLead: (leadId: string) => Promise<void>;
+  moveLeadToStage: (leadId: string, stageId: string) => Promise<void>;
 
   conversations: Conversation[];
   selectedConversation: string | null;
@@ -80,10 +88,11 @@ interface AppState {
   setStatusFilter: (filter: ConversationStatus | 'all') => void;
 
   tasks: Task[];
-  updateTaskStatus: (taskId: string, status: Task['status']) => void;
-  updateTask: (taskId: string, updates: Partial<Task>) => void;
-  addTask: (task: Task) => void;
-  deleteTask: (taskId: string) => void;
+  fetchTasks: () => Promise<void>;
+  updateTaskStatus: (taskId: string, status: Task['status']) => Promise<void>;
+  updateTask: (taskId: string, updates: Partial<Task>) => Promise<void>;
+  addTask: (task: Omit<Task, '_id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
+  deleteTask: (taskId: string) => Promise<void>;
 
   selectedPipelineId: string;
   setSelectedPipelineId: (id: string) => void;
@@ -134,35 +143,67 @@ interface AppState {
   updateBranding: (updates: Partial<AppState['branding']>) => void;
 
   calendarEvents: CalendarEvent[];
-  addCalendarEvent: (event: CalendarEvent) => void;
-  updateCalendarEvent: (id: string, updates: Partial<CalendarEvent>) => void;
-  deleteCalendarEvent: (id: string) => void;
+  fetchCalendarEvents: () => Promise<void>;
+  addCalendarEvent: (event: Omit<CalendarEvent, '_id'>) => Promise<void>;
+  updateCalendarEvent: (id: string, updates: Partial<CalendarEvent>) => Promise<void>;
+  deleteCalendarEvent: (id: string) => Promise<void>;
 
   clients: Client[];
-  addClient: (client: Client) => void;
-  updateClient: (id: string, updates: Partial<Client>) => void;
-  deleteClient: (id: string) => void;
+  fetchClients: () => Promise<void>;
+  addClient: (client: Omit<Client, '_id' | 'createdAt' | 'updatedAt'>) => Promise<void>;
+  updateClient: (id: string, updates: Partial<Client>) => Promise<void>;
+  deleteClient: (id: string) => Promise<void>;
 }
 
-export const useStore = create<AppState>((set) => ({
+export const useStore = create<AppState>((set, get) => ({
+  // Global State
+  isLoading: false,
+  error: null,
+  setLoading: (loading) => set({ isLoading: loading }),
+  setError: (error) => set({ error }),
+
   currentPage: 'login',
   setCurrentPage: (page) => set({ currentPage: page }),
 
-  isAuthenticated: false,
+  isAuthenticated: authService.isAuthenticated(),
   currentUser: null,
-  login: (email: string, _password: string) => {
-    const user = mockUsers.find(u => u.email === email);
-    if (user || email) {
-      set({
-        isAuthenticated: true,
-        currentUser: user || { ...mockUsers[0], email },
-        currentPage: 'dashboard',
-      });
-      return true;
+  login: async (email: string, password: string) => {
+    set({ isLoading: true, error: null });
+    try {
+      const res = await authService.login({ email, password });
+      if (res.success) {
+        set({
+          isAuthenticated: true,
+          currentUser: res.data.user,
+          currentPage: 'dashboard',
+          isLoading: false
+        });
+        return true;
+      }
+      set({ isLoading: false, error: 'Login falhou' });
+      return false;
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message || 'Erro ao fazer login' });
+      return false;
     }
-    return false;
   },
-  logout: () => set({ isAuthenticated: false, currentUser: null, currentPage: 'login' }),
+  logout: () => {
+    authService.logout();
+    set({ isAuthenticated: false, currentUser: null, currentPage: 'login' });
+  },
+  checkAuth: async () => {
+    if (!authService.isAuthenticated()) return;
+    try {
+      const res = await authService.getMe();
+      if (res.success) {
+        set({ isAuthenticated: true, currentUser: res.data });
+      } else {
+        get().logout();
+      }
+    } catch (err) {
+      get().logout();
+    }
+  },
 
   sidebarCollapsed: false,
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
@@ -170,23 +211,61 @@ export const useStore = create<AppState>((set) => ({
   aiAssistantVisible: true,
   toggleAiAssistant: () => set((state) => ({ aiAssistantVisible: !state.aiAssistantVisible })),
 
-  leads: mockLeads,
-  addLead: (lead) =>
-    set((state) => ({
-      leads: [lead, ...state.leads],
-    })),
-  updateLead: (leadId, updates) =>
-    set((state) => ({
-      leads: state.leads.map((l) => (l._id === leadId ? { ...l, ...updates } : l)),
-    })),
-  deleteLead: (leadId) =>
-    set((state) => ({
-      leads: state.leads.filter((l) => l._id !== leadId),
-    })),
-  moveLeadToStage: (leadId, stageId) =>
+  leads: mockLeads, // Fallback initial state
+  fetchLeads: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const res = await leadService.getAll();
+      set({ leads: res.data, isLoading: false });
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  addLead: async (leadData) => {
+    set({ isLoading: true, error: null });
+    try {
+      const newLead = await leadService.create(leadData);
+      set((state) => ({ leads: [newLead, ...state.leads], isLoading: false }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  updateLead: async (leadId, updates) => {
+    set({ isLoading: true, error: null });
+    try {
+      const updatedLead = await leadService.update(leadId, updates);
+      set((state) => ({
+        leads: state.leads.map((l) => (l._id === leadId ? updatedLead : l)),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  deleteLead: async (leadId) => {
+    set({ isLoading: true, error: null });
+    try {
+      await leadService.delete(leadId);
+      set((state) => ({
+        leads: state.leads.filter((l) => l._id !== leadId),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  moveLeadToStage: async (leadId, stageId) => {
+    // Otimista
     set((state) => ({
       leads: state.leads.map((l) => (l._id === leadId ? { ...l, stageId } : l)),
-    })),
+    }));
+    try {
+      await leadService.moveToStage(leadId, stageId);
+    } catch (err: any) {
+      set({ error: err.message });
+      // Idealmente reverter a UI, simplificado por agora
+    }
+  },
 
   conversations: mockConversations,
   selectedConversation: null,
@@ -218,23 +297,57 @@ export const useStore = create<AppState>((set) => ({
   statusFilter: 'all',
   setStatusFilter: (filter) => set({ statusFilter: filter }),
 
-  tasks: mockTasks,
-  updateTaskStatus: (taskId, status) =>
-    set((state) => ({
-      tasks: state.tasks.map((t) => (t._id === taskId ? { ...t, status } : t)),
-    })),
-  updateTask: (taskId, updates) =>
-    set((state) => ({
-      tasks: state.tasks.map((t) => (t._id === taskId ? { ...t, ...updates } : t)),
-    })),
-  addTask: (task) =>
-    set((state) => ({
-      tasks: [task, ...state.tasks],
-    })),
-  deleteTask: (taskId) =>
-    set((state) => ({
-      tasks: state.tasks.filter((t) => t._id !== taskId),
-    })),
+  tasks: mockTasks, // Fallback initial state
+  fetchTasks: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const res = await taskService.getAll();
+      set({ tasks: res.data, isLoading: false });
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  updateTaskStatus: async (taskId, status) => {
+    set((state) => ({ tasks: state.tasks.map((t) => (t._id === taskId ? { ...t, status } : t)) }));
+    try {
+      await taskService.updateStatus(taskId, status);
+    } catch (err: any) {
+      set({ error: err.message });
+    }
+  },
+  updateTask: async (taskId, updates) => {
+    set({ isLoading: true, error: null });
+    try {
+      const updated = await taskService.update(taskId, updates);
+      set((state) => ({
+        tasks: state.tasks.map((t) => (t._id === taskId ? updated : t)),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  addTask: async (taskData) => {
+    set({ isLoading: true, error: null });
+    try {
+      const newTask = await taskService.create(taskData);
+      set((state) => ({ tasks: [newTask, ...state.tasks], isLoading: false }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  deleteTask: async (taskId) => {
+    set({ isLoading: true, error: null });
+    try {
+      await taskService.delete(taskId);
+      set((state) => ({
+        tasks: state.tasks.filter((t) => t._id !== taskId),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
 
   selectedPipelineId: 'pip_1',
   setSelectedPipelineId: (id) => set({ selectedPipelineId: id }),
@@ -403,12 +516,90 @@ export const useStore = create<AppState>((set) => ({
     { _id: 'ev_15', title: 'Planejamento Sprint', description: 'Definição de prioridades para a próxima sprint', category: 'meeting', date: new Date(Date.now() - 86400000).toISOString().split('T')[0], startTime: '09:00', endTime: '10:00', color: '#6366f1', completed: true },
     { _id: 'ev_16', title: 'Envio de propostas', description: 'Enviar propostas para 3 novos leads', category: 'task', date: new Date(Date.now() - 86400000).toISOString().split('T')[0], startTime: '14:00', endTime: '16:00', color: '#3b82f6', completed: true },
   ],
-  addCalendarEvent: (event) => set((state) => ({ calendarEvents: [event, ...state.calendarEvents] })),
-  updateCalendarEvent: (id, updates) => set((state) => ({ calendarEvents: state.calendarEvents.map(e => e._id === id ? { ...e, ...updates } : e) })),
-  deleteCalendarEvent: (id) => set((state) => ({ calendarEvents: state.calendarEvents.filter(e => e._id !== id) })),
+  fetchCalendarEvents: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const res = await calendarService.getAll();
+      set({ calendarEvents: res.data, isLoading: false });
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  addCalendarEvent: async (eventData) => {
+    set({ isLoading: true, error: null });
+    try {
+      const newEvent = await calendarService.create(eventData);
+      set((state) => ({ calendarEvents: [newEvent, ...state.calendarEvents], isLoading: false }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  updateCalendarEvent: async (id, updates) => {
+    set({ isLoading: true, error: null });
+    try {
+      const updated = await calendarService.update(id, updates);
+      set((state) => ({
+        calendarEvents: state.calendarEvents.map(e => e._id === id ? updated : e),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  deleteCalendarEvent: async (id) => {
+    set({ isLoading: true, error: null });
+    try {
+      await calendarService.delete(id);
+      set((state) => ({
+        calendarEvents: state.calendarEvents.filter(e => e._id !== id),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
 
   clients: mockClients,
-  addClient: (client) => set((state) => ({ clients: [client, ...state.clients] })),
-  updateClient: (id, updates) => set((state) => ({ clients: state.clients.map(c => c._id === id ? { ...c, ...updates, updatedAt: new Date().toISOString() } : c) })),
-  deleteClient: (id) => set((state) => ({ clients: state.clients.filter(c => c._id !== id) })),
+  fetchClients: async () => {
+    set({ isLoading: true, error: null });
+    try {
+      const res = await clientService.getAll();
+      set({ clients: res.data, isLoading: false });
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  addClient: async (clientData) => {
+    set({ isLoading: true, error: null });
+    try {
+      const newClient = await clientService.create(clientData);
+      set((state) => ({ clients: [newClient, ...state.clients], isLoading: false }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  updateClient: async (id, updates) => {
+    set({ isLoading: true, error: null });
+    try {
+      const updated = await clientService.update(id, updates);
+      set((state) => ({
+        clients: state.clients.map(c => c._id === id ? updated : c),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
+  deleteClient: async (id) => {
+    set({ isLoading: true, error: null });
+    try {
+      await clientService.delete(id);
+      set((state) => ({
+        clients: state.clients.filter(c => c._id !== id),
+        isLoading: false
+      }));
+    } catch (err: any) {
+      set({ isLoading: false, error: err.message });
+    }
+  },
 }));
